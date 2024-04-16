@@ -1,0 +1,8 @@
+eval_results/
+eval_results_70/
+results/
+results_70/
+log/
+wandb/
+train_70.json
+data/
