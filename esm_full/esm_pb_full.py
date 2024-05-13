@@ -1,10 +1,11 @@
 import json
-import numpy as np
-import peft
-import pickle
 import os
+import numpy as np
+import sys
 import wandb
 import torch
+import pickle
+import argparse
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from accelerate import Accelerator
@@ -24,18 +25,22 @@ from sklearn.metrics import (
     f1_score,
 )
 from sklearn.utils.class_weight import compute_class_weight
-from peft import get_peft_config, PeftModel, PeftConfig, get_peft_model, LoraConfig, TaskType
-import setproctitle
 
-setproctitle.setproctitle("esm_lora")
 
-# wandb.login(key='471850dc0af0748ea73eb1fbf278a9075c79f11d')
-# wandb.init()
-# MAX_LABEL_LENGTH = 253
-MAX_LABEL_LENGTH = 247
-# MODEL_PATH="facebook/esm1b_t33_650M_UR50S"
-MODEL_PATH = "facebook/esm2_t36_3B_UR50D"
+parser = argparse.ArgumentParser(description="ESM_PB")
+parser.add_argument("split", type=str, default="70", help="input the split type")
+parser.add_argument("label_length", type=int, default="5093", help="input the label length")
+parser.add_argument(
+    "model", type=str, default="esm2", help="input the model type"
+)
+args = parser.parse_args()
+
+MAX_LABEL_LENGTH = int(args.label_length)
+MODEL_PATH = "facebook/esm2_t33_650M_UR50D" if args.model == "esm2" else "facebook/esm1b_t33_650M_UR50S"
+print("MODEL_PATH is", MODEL_PATH)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+model = EsmForSequenceClassification.from_pretrained(MODEL_PATH, num_labels=MAX_LABEL_LENGTH, problem_type="multi_label_classification")
+
 class EnzymeDataset(Dataset):
     """
     Dataset class for enzyme sequence classification.
@@ -44,7 +49,7 @@ class EnzymeDataset(Dataset):
         self.json_data = json.load(open(file_path, 'r'))
         self.sequences = [data['sequence'] for data in self.json_data.values()]
         self.labels = [data['ec'] for data in self.json_data.values()]
-        self.ec_lst = pickle.load(open('/scratch0/zx22/zijie/esm_ft/data/ec_type_50.pkl', 'rb'))
+        self.ec_lst = pickle.load(open(f'/scratch0/zx22/zijie/esm_ft/esm_full/data/ec_type_{args.split}.pkl', 'rb'))
 
     def __len__(self):
         return len(self.sequences)
@@ -57,7 +62,7 @@ class EnzymeDataset(Dataset):
         sequence = self.sequences[idx]
         onehot_label = self._get_label(self.labels[idx])
         return sequence, torch.tensor(onehot_label)
-      
+
 def collate_fn(batch):
     """Define teh collate function for dataloader"""
     sequences, labels = zip(*batch)
@@ -68,31 +73,18 @@ def collate_fn(batch):
 
 
 accelerator = Accelerator()
-train_dataset = EnzymeDataset("/scratch0/zx22/zijie/esm_ft/data/train_50.json")
-validation_dataset = EnzymeDataset("/scratch0/zx22/zijie/esm_ft/data/new_cut.json")
+train_dataset = EnzymeDataset(f"/scratch0/zx22/zijie/esm_ft/esm_full/data/train_{args.split}.json")
+# train_dataset, validation_dataset = random_split(all_dataset, [int(0.8 * len(all_dataset)), len(all_dataset)-int(0.8 * len(all_dataset))])
+validation_dataset = EnzymeDataset("/scratch0/zx22/zijie/esm_ft/esm_full/data/new_cut.json")
 
-# tokenizer = AutoTokenizer.from_pretrained("facebook/esm2_t33_650M_UR50D")
-model = EsmForSequenceClassification.from_pretrained("/scratch0/zx22/zijie/esm_ft/results_50/esm2/650mlora_2024-04-29_19-25-38/checkpoint-147160", num_labels=MAX_LABEL_LENGTH, problem_type="multi_label_classification")
 # model.classifier = nn.Linear(in_features=320, out_features=MAX_LABEL_LENGTH)
 
-peft_config = LoraConfig(
-      inference_mode=False,
-      r=8,
-      lora_alpha=2,
-      target_modules=["query", "key", "value"],
-      lora_dropout=0.2,
-      bias="lora_only"
-  )
+for param in model.esm.parameters():
+    param.requires_grad = False
 
-model = get_peft_model(model, peft_config)
-
-for pn, p in model.named_parameters():
-    if not 'lora' in pn:
-        p.requires_grad_(False)
-        
-for params in model.classifier.parameters():
-    params.requires_grad_(True)
-
+# only classifier need training
+for param in model.classifier.parameters():
+    print(param.requires_grad)
 
 model = accelerator.prepare(model)
 train_dataset = accelerator.prepare(train_dataset)
@@ -100,13 +92,14 @@ validation_dataset = accelerator.prepare(validation_dataset)
 
 timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
+# Define TrainingArguments
 training_args = TrainingArguments(
-    output_dir=f"/scratch0/zx22/zijie/esm_ft/results_50/esm2/650mlora_{timestamp}",
+    output_dir=f"/scratch0/zx22/zijie/esm_ft/esm_full/results_{args.split}/{args.model}/650mpb_{timestamp}",
     num_train_epochs=30,
     learning_rate=1e-03,
     lr_scheduler_type="cosine",
-    per_device_train_batch_size=2,
-    per_device_eval_batch_size=2,
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=32,
     remove_unused_columns=False,
     warmup_steps=500,
     weight_decay=0.01,
@@ -114,9 +107,8 @@ training_args = TrainingArguments(
     save_strategy="epoch",
     # eval_steps=1,
     fp16=True,
-    gradient_checkpointing=True,
     eval_accumulation_steps=2,
-    # gradient_accumulation_steps=1,
+    gradient_checkpointing=True,
     load_best_model_at_end=True,
     metric_for_best_model="f1",
     greater_is_better=True,
@@ -125,8 +117,7 @@ training_args = TrainingArguments(
     logging_first_step=False,
     save_total_limit=100,
     no_cuda=False,
-    optim="adafactor",
-    # report_to='wandb'
+    report_to='wandb'
     )
 
 def accuracy(predication, labels):
@@ -146,7 +137,6 @@ def compute_metrics(p):
     em = accuracy(predication, labels)
     hamming = hamming_loss(y_true=labels, y_pred=predication)
     return {'em': em, 'precision': precision, 'recall': recall, 'f1': f1, 'hammingloss': hamming}
-
 
 class WeightedTrainer(Trainer):
     def __int__(self, *args, **kwargs):
@@ -182,12 +172,12 @@ trainer = WeightedTrainer(
 
 # Train and Evaluate the model
 trainer.train()
-save_path = os.path.join("/scratch0/zx22/zijie/esm_ft/results_50/esm2", f"best_model_esm2_650M_lora/{timestamp}")
+save_path = os.path.join(f"/scratch0/zx22/zijie/esm_ft/esm_full/results_{args.split}/{args.model}", f"best_model_{args.model}_650M_probe/{timestamp}")
 trainer.save_model(save_path)
 tokenizer.save_pretrained(save_path)
 
-
-
-                                                        
-      
-
+"""
+CUDA_VISIBLE_DEVICES=3,4 nohup python -u esm_pb_full.py 50 4209 esm2 > log/esm2_650m.50pb 2>&1 &
+CUDA_VISIBLE_DEVICES=4,3 nohup python -u esm_pb_full.py 30 3155 esm2 > log/esm2_650m.30pb 2>&1 &
+CUDA_VISIBLE_DEVICES=5 nohup python -u esm_pb_full.py 10 2702 esm2 > log/esm2_650m.10pb 2>&1 &
+"""

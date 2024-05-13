@@ -22,14 +22,14 @@ from sklearn.metrics import (
 )
 from sklearn.utils.class_weight import compute_class_weight
 
-MAX_LABEL_LENGTH = 253
+MAX_LABEL_LENGTH = 5093
 
 """
 facebook/esm2_t6_8M_UR50D
 facebook/esm2_t33_650M_UR50D
 facebook/esm1b_t33_650M_UR50S
 """
-TOKEN_PATH = "facebook/esm1b_t33_650M_UR50S"
+TOKEN_PATH = "facebook/esm2_t33_650M_UR50D"
 tokenizer = AutoTokenizer.from_pretrained(TOKEN_PATH)
 
 
@@ -41,7 +41,7 @@ class EnzymeDataset(Dataset):
         self.json_data = json.load(open(file_path, 'r'))
         self.sequences = [data['sequence'] for data in self.json_data.values()]
         self.labels = [data['ec'] for data in self.json_data.values()]
-        self.ec_lst = pickle.load(open('/scratch0/zx22/zijie/esm_ft/data/ec_type_70.pkl', 'rb'))
+        self.ec_lst = pickle.load(open('/scratch0/zx22/zijie/esm_ft/esm_full/data/ec_type_70.pkl', 'rb'))
 
     def __len__(self):
         return len(self.sequences)
@@ -95,7 +95,7 @@ wandb.init()
 
 
 training_args = TrainingArguments(
-    output_dir=f"/scratch0/zx22/zijie/esm_ft/results",
+    output_dir=f"/scratch0/zx22/zijie/esm_ft/esm_full/results_70",
     do_eval=True,
     no_cuda=True,
     do_train=False,
@@ -138,7 +138,7 @@ class WeightedTrainer(Trainer):
         return (loss, logits, labels)
 
 
-validation_dataset = EnzymeDataset(f"/scratch0/zx22/zijie/esm_ft/data/{sys.argv[2]}.json")
+validation_dataset = EnzymeDataset(f"/scratch0/zx22/zijie/esm_ft/esm_full/data/{sys.argv[2]}.json")
 accelerator = Accelerator()
 model = accelerator.prepare(model)
 

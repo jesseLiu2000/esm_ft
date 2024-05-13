@@ -6,3 +6,9 @@ log/
 wandb/
 train_70.json
 data/
+results_50/
+esm_full/eval_results_70/
+esm_full/results_70/
+esm_full/wandb/
+results_50/
+eval_results_50/
